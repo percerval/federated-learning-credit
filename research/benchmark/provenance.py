@@ -42,6 +42,7 @@ DEFAULT_SOURCE_FILES = (
     "research/__init__.py",
     "research/benchmark/__init__.py",
     "research/benchmark/classic.py",
+    "research/benchmark/client_test.py",
     "research/benchmark/data.py",
     "research/benchmark/evaluation.py",
     "research/benchmark/fedavg.py",

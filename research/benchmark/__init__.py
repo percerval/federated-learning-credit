@@ -8,6 +8,7 @@ from research.benchmark.classic import (
     require_official_training_seed,
     require_train_scope,
 )
+from research.benchmark.client_test import ClientTestError, derive_client_tests
 from research.benchmark.data import DatasetView, ExperimentalData, load_experimental_data
 from research.benchmark.evaluation import evaluate_scores, evaluate_global, weighted_batch_loss
 from research.benchmark.fedavg import (
@@ -45,6 +46,7 @@ from research.benchmark.seeding import (
 
 __all__ = [
     "ClassicModel",
+    "ClientTestError",
     "DatasetView",
     "ExperimentalData",
     "FedAvgError",
@@ -68,6 +70,7 @@ __all__ = [
     "clone_state_dict",
     "configure_determinism",
     "derive_seed",
+    "derive_client_tests",
     "epoch_permutation",
     "evaluate_global",
     "evaluate_scores",
