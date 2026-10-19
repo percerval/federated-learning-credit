@@ -102,6 +102,24 @@ class BlockTrainingReport:
     fit_indices: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class TrainingStepReport:
+    """Escopo e custo de um único bloco/round com Adam independente."""
+
+    namespace: str
+    client_id: str | None
+    training_seed: int
+    step: int
+    epochs: int
+    batch_size: int
+    learning_rate: float
+    examples_processed: int
+    optimizer_steps: int
+    theoretical_examples: int
+    theoretical_steps: int
+    fit_indices: tuple[int, ...]
+
+
 def _torch():
     try:
         import torch
@@ -286,6 +304,84 @@ def epoch_permutation(example_count: int, *, training_seed: int, namespace: str,
     return tuple(order)
 
 
+def train_step(network, train_view: DatasetView, *, namespace: str,
+               client_id: str | None, training_seed: int, step: int,
+               epochs: int = EPOCHS_PER_BLOCK, batch_size: int = BATCH_SIZE,
+               learning_rate: float = LEARNING_RATE,
+               shuffle_seed_fn=shuffle_seed) -> TrainingStepReport:
+    """Treina um bloco/round com Adam novo sobre uma rede já carregada.
+
+    O caller controla o estado inicial da ``network``; o pareamento oficial
+    continua sendo validado por ``train_blocks`` antes do primeiro bloco.
+    """
+    train_view = _validated_view(train_view, name="train_view")
+    training_seed = _training_seed(training_seed)
+    _require(namespace in {"central", "federated", "local"},
+             "namespace de treino inválido")
+    if namespace == "central":
+        _require(client_id is None, "treino central não possui client_id")
+    else:
+        _require(client_id in CLIENT_IDS,
+                 "treino federated/local exige client_id congelado")
+    _require(type(step) is int and step >= 0,
+             "step deve ser inteiro não negativo")
+    epochs = _positive_int("epochs", epochs)
+    batch_size = _positive_int("batch_size", batch_size)
+    _require(type(learning_rate) in (int, float)
+             and math.isfinite(float(learning_rate)) and learning_rate > 0,
+             "learning_rate deve ser número finito positivo")
+    _require(callable(shuffle_seed_fn), "shuffle_seed_fn deve ser chamável")
+
+    torch = _torch()
+    network = _validated_network(network, torch)
+    features = torch.tensor(train_view.features, dtype=torch.float32)
+    labels = torch.tensor(train_view.labels, dtype=torch.float32)
+    criterion = build_loss()
+    optimizer = torch.optim.Adam(network.parameters(), lr=float(learning_rate))
+    examples_processed = 0
+    optimizer_steps = 0
+    network.train()
+
+    for epoch in range(epochs):
+        order = epoch_permutation(
+            len(train_view), training_seed=training_seed,
+            namespace=namespace, client_id=client_id,
+            block=step, epoch=epoch, shuffle_seed_fn=shuffle_seed_fn,
+        )
+        order_tensor = torch.tensor(order, dtype=torch.long)
+        shuffled_features = features[order_tensor]
+        shuffled_labels = labels[order_tensor]
+        for start in range(0, len(train_view), batch_size):
+            batch_features = shuffled_features[start:start + batch_size]
+            batch_labels = shuffled_labels[start:start + batch_size]
+            optimizer.zero_grad(set_to_none=True)
+            logits = network(batch_features).reshape(-1)
+            loss = criterion(logits, batch_labels)
+            loss.backward()
+            optimizer.step()
+            examples_processed += int(batch_labels.shape[0])
+            optimizer_steps += 1
+
+    theoretical_examples, theoretical_steps = theoretical_costs(
+        len(train_view), blocks=1, epochs_per_block=epochs,
+        batch_size=batch_size,
+    )
+    return TrainingStepReport(
+        namespace=namespace,
+        client_id=client_id,
+        training_seed=training_seed,
+        step=step,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=float(learning_rate),
+        examples_processed=examples_processed,
+        optimizer_steps=optimizer_steps,
+        theoretical_examples=theoretical_examples,
+        theoretical_steps=theoretical_steps,
+        fit_indices=tuple(train_view.indices),
+    )
+
+
 def train_blocks(network, train_view: DatasetView, *, model_family: str,
                  training_seed: int, initial_state: Mapping,
                  client_id: str | None = None,
@@ -320,35 +416,18 @@ def train_blocks(network, train_view: DatasetView, *, model_family: str,
     except RuntimeError as exc:
         raise MLPError("initial_state incompatível com a arquitetura") from exc
 
-    features = torch.tensor(train_view.features, dtype=torch.float32)
-    labels = torch.tensor(train_view.labels, dtype=torch.float32)
-    criterion = build_loss()
     examples_processed = 0
     optimizer_steps = 0
-    network.train()
 
     for block in range(blocks):
-        optimizer = torch.optim.Adam(network.parameters(), lr=float(learning_rate))
-        for epoch in range(epochs_per_block):
-            order = epoch_permutation(
-                len(train_view), training_seed=training_seed,
-                namespace=namespace, client_id=client_id,
-                block=block, epoch=epoch,
-                shuffle_seed_fn=shuffle_seed_fn,
-            )
-            order_tensor = torch.tensor(order, dtype=torch.long)
-            shuffled_features = features[order_tensor]
-            shuffled_labels = labels[order_tensor]
-            for start in range(0, len(train_view), batch_size):
-                batch_features = shuffled_features[start:start + batch_size]
-                batch_labels = shuffled_labels[start:start + batch_size]
-                optimizer.zero_grad(set_to_none=True)
-                logits = network(batch_features).reshape(-1)
-                loss = criterion(logits, batch_labels)
-                loss.backward()
-                optimizer.step()
-                examples_processed += int(batch_labels.shape[0])
-                optimizer_steps += 1
+        step_report = train_step(
+            network, train_view, namespace=namespace, client_id=client_id,
+            training_seed=training_seed, step=block, epochs=epochs_per_block,
+            batch_size=batch_size, learning_rate=float(learning_rate),
+            shuffle_seed_fn=shuffle_seed_fn,
+        )
+        examples_processed += step_report.examples_processed
+        optimizer_steps += step_report.optimizer_steps
 
     theoretical_examples, theoretical_steps = theoretical_costs(
         len(train_view), blocks=blocks, epochs_per_block=epochs_per_block,

@@ -10,6 +10,14 @@ from research.benchmark.classic import (
 )
 from research.benchmark.data import DatasetView, ExperimentalData, load_experimental_data
 from research.benchmark.evaluation import evaluate_scores, evaluate_global, weighted_batch_loss
+from research.benchmark.fedavg import (
+    FedAvgError,
+    FedAvgTrainingReport,
+    FederatedClientRoundReport,
+    FederatedRoundReport,
+    aggregate_state_dicts,
+    train_fedavg,
+)
 from research.benchmark.mlp import (
     ARCHITECTURE,
     BlockTrainingReport,
@@ -39,6 +47,10 @@ __all__ = [
     "ClassicModel",
     "DatasetView",
     "ExperimentalData",
+    "FedAvgError",
+    "FedAvgTrainingReport",
+    "FederatedClientRoundReport",
+    "FederatedRoundReport",
     "LogisticRegressionBaseline",
     "MLPArchitecture",
     "MLPBatchPrediction",
@@ -48,6 +60,7 @@ __all__ = [
     "ARCHITECTURE",
     "BlockTrainingReport",
     "artifact_id",
+    "aggregate_state_dicts",
     "build_loss",
     "build_network",
     "build_provenance",
@@ -69,5 +82,6 @@ __all__ = [
     "shuffle_seed",
     "theoretical_costs",
     "train_blocks",
+    "train_fedavg",
     "weighted_batch_loss",
 ]

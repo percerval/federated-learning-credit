@@ -31,19 +31,20 @@ from research.benchmark.seeding import TRAINING_SEEDS, canonical_json_bytes
 from research.data.pipeline import load_record
 
 # Manifesto default completo dos arquivos .py executados atualmente pela
-# infraestrutura E3.1A, pelos modelos clássicos E3.1B.1 e pelos componentes
-# MLP E3.1B.2: pacote
+# infraestrutura E3.1A, pelos modelos clássicos E3.1B.1, pelos componentes
+# MLP E3.1B.2 e pela agregação FedAvg E3.1B.3: pacote
 # research.benchmark, suas dependências em research.data e contracts, e o
 # pacote pai research. Um teste de cobertura falha se um novo .py aparecer
 # sob esses diretórios sem ser registrado aqui. A E3.2 deverá acrescentar ao
-# manifesto (via source_files) os novos arquivos executados — FedAvg, runner e
-# demais módulos — antes de qualquer execução oficial.
+# manifesto (via source_files) os novos arquivos executados — coordenador,
+# runner e demais módulos — antes de qualquer execução oficial.
 DEFAULT_SOURCE_FILES = (
     "research/__init__.py",
     "research/benchmark/__init__.py",
     "research/benchmark/classic.py",
     "research/benchmark/data.py",
     "research/benchmark/evaluation.py",
+    "research/benchmark/fedavg.py",
     "research/benchmark/mlp.py",
     "research/benchmark/provenance.py",
     "research/benchmark/seeding.py",

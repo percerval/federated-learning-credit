@@ -26,6 +26,7 @@ from research.benchmark.mlp import (
     LEARNING_RATE,
     MLPArchitecture,
     MLPError,
+    TrainingStepReport,
     build_loss,
     build_network,
     clone_state_dict,
@@ -35,6 +36,7 @@ from research.benchmark.mlp import (
     predict_view,
     theoretical_costs,
     train_blocks,
+    train_step,
 )
 from research.benchmark.seeding import SeedingError, TRAINING_SEEDS, shuffle_seed
 
@@ -361,6 +363,102 @@ class TorchMLPComponentTests(unittest.TestCase):
         self.assertEqual(len({id(optimizer.state) for optimizer in created}), 3)
         created[0].param_groups[0]["lr"] = 999.0
         self.assertEqual(created[1].param_groups[0]["lr"], LEARNING_RATE)
+
+    def test_train_step_uses_explicit_scope_and_independent_adam(self):
+        import torch
+
+        calls = []
+        created = []
+        real_adam = torch.optim.Adam
+
+        def seed_spy(training_seed, namespace, *, client_id, step, epoch):
+            calls.append((training_seed, namespace, client_id, step, epoch))
+            return _synthetic_shuffle_seed(
+                training_seed, namespace, client_id=client_id,
+                step=step, epoch=epoch,
+            )
+
+        def adam_spy(*args, **kwargs):
+            optimizer = real_adam(*args, **kwargs)
+            created.append(optimizer)
+            return optimizer
+
+        network = build_network()
+        network.load_state_dict(initial_state_dict(42), strict=True)
+        torch.manual_seed(987)
+        rng_before = torch.random.get_rng_state().clone()
+        with mock.patch("torch.optim.Adam", side_effect=adam_spy):
+            first = train_step(
+                network, _view(13), namespace="federated",
+                client_id="client-1", training_seed=7, step=4,
+                epochs=2, batch_size=8, learning_rate=0.02,
+                shuffle_seed_fn=seed_spy,
+            )
+            second = train_step(
+                network, _view(13), namespace="federated",
+                client_id="client-1", training_seed=7, step=5,
+                epochs=1, batch_size=8, learning_rate=0.02,
+                shuffle_seed_fn=seed_spy,
+            )
+
+        self.assertIsInstance(first, TrainingStepReport)
+        self.assertEqual(
+            (first.namespace, first.client_id, first.step, first.epochs),
+            ("federated", "client-1", 4, 2),
+        )
+        self.assertEqual(first.examples_processed, 26)
+        self.assertEqual(first.optimizer_steps, 4)
+        self.assertEqual(first.examples_processed, first.theoretical_examples)
+        self.assertEqual(first.optimizer_steps, first.theoretical_steps)
+        self.assertEqual(second.step, 5)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(len({id(optimizer) for optimizer in created}), 2)
+        self.assertEqual(len({id(optimizer.state) for optimizer in created}), 2)
+        self.assertEqual(calls, [
+            (7, "federated", "client-1", 4, 0),
+            (7, "federated", "client-1", 4, 1),
+            (7, "federated", "client-1", 5, 0),
+        ])
+        self.assertTrue(torch.equal(rng_before, torch.random.get_rng_state()))
+
+    def test_train_blocks_matches_explicit_train_steps(self):
+        import torch
+
+        view = _view(21)
+        state = initial_state_dict(42)
+        blocks_network = build_network()
+        blocks_report = train_blocks(
+            blocks_network, view, model_family="mlp_centralized",
+            training_seed=7, initial_state=state,
+            blocks=2, epochs_per_block=3, batch_size=8,
+            learning_rate=0.02, shuffle_seed_fn=_synthetic_shuffle_seed,
+        )
+
+        steps_network = build_network()
+        steps_network.load_state_dict(clone_state_dict(state), strict=True)
+        step_reports = tuple(
+            train_step(
+                steps_network, view, namespace="central", client_id=None,
+                training_seed=7, step=step, epochs=3, batch_size=8,
+                learning_rate=0.02,
+                shuffle_seed_fn=_synthetic_shuffle_seed,
+            )
+            for step in range(2)
+        )
+
+        blocks_state = final_state(blocks_network)
+        steps_state = final_state(steps_network)
+        self.assertTrue(all(torch.equal(blocks_state[key], steps_state[key])
+                            for key in blocks_state))
+        self.assertEqual(
+            blocks_report.examples_processed,
+            sum(report.examples_processed for report in step_reports),
+        )
+        self.assertEqual(
+            blocks_report.optimizer_steps,
+            sum(report.optimizer_steps for report in step_reports),
+        )
+        self.assertEqual(blocks_report.fit_indices, view.indices)
 
     def test_accounting_includes_partial_batch_and_derives_each_epoch_seed(self):
         calls = []
