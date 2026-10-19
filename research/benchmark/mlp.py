@@ -17,8 +17,8 @@ importável no ambiente stdlib sem a dependência.
 Os argumentos de agenda são parametrizáveis para testes unitários pequenos.
 Uma execução oficial deve usar os defaults congelados e a E3.2 deverá conferir
 o relatório, o escopo de índices e as cinco seeds oficiais antes de publicar
-qualquer resultado. FedAvg, validação por bloco, checkpoints e artefatos
-oficiais permanecem fora deste módulo e desta etapa.
+qualquer resultado. O monitoramento de validation por bloco é observacional;
+FedAvg, checkpoints e artefatos oficiais permanecem fora deste módulo.
 """
 
 from __future__ import annotations
@@ -26,9 +26,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import random
+from types import MappingProxyType
 from typing import Mapping
 
 from research.benchmark.data import DatasetView
+from research.benchmark.evaluation import evaluate_scores
 from research.benchmark.seeding import (
     TRAINING_SEEDS,
     paired_initialization_seed,
@@ -120,6 +122,24 @@ class TrainingStepReport:
     fit_indices: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class MonitoredBlockReport:
+    """Treino e métricas de validation observadas ao fim de um bloco."""
+
+    block_index: int
+    training: TrainingStepReport
+    validation_indices: tuple[int, ...]
+    validation_metrics: Mapping
+
+
+@dataclass(frozen=True)
+class MonitoredTrainingReport:
+    """Treino completo e observações imutáveis de validation por bloco."""
+
+    training: BlockTrainingReport
+    blocks: tuple[MonitoredBlockReport, ...]
+
+
 def _torch():
     try:
         import torch
@@ -130,6 +150,14 @@ def _torch():
 
 def _positive_int(name: str, value: int) -> int:
     _require(type(value) is int and value > 0, f"{name} deve ser inteiro positivo")
+    return value
+
+
+def _freeze(value):
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
     return value
 
 
@@ -382,20 +410,33 @@ def train_step(network, train_view: DatasetView, *, namespace: str,
     )
 
 
-def train_blocks(network, train_view: DatasetView, *, model_family: str,
-                 training_seed: int, initial_state: Mapping,
-                 client_id: str | None = None,
-                 blocks: int = BLOCKS, epochs_per_block: int = EPOCHS_PER_BLOCK,
-                 batch_size: int = BATCH_SIZE,
-                 learning_rate: float = LEARNING_RATE,
-                 shuffle_seed_fn=shuffle_seed) -> BlockTrainingReport:
-    """Treina central ou localmente, recriando Adam no início de cada bloco.
-
-    ``initial_state`` deve ser uma cópia da saída única de
-    ``initial_state_dict`` no caminho oficial. A função muta ``network`` e
-    devolve somente contabilização e prova do escopo de treino.
-    """
+def _train_blocks_core(network, train_view: DatasetView, *, model_family: str,
+                       training_seed: int, initial_state: Mapping,
+                       client_id: str | None, blocks: int,
+                       epochs_per_block: int, batch_size: int,
+                       learning_rate: float, shuffle_seed_fn,
+                       validation_view: DatasetView | None = None
+                       ) -> tuple[BlockTrainingReport,
+                                  tuple[MonitoredBlockReport, ...]]:
     train_view = _validated_view(train_view, name="train_view")
+    if validation_view is not None:
+        validation_view = _validated_view(validation_view, name="validation_view")
+        _require(
+            all(type(index) is int for index in validation_view.indices),
+            "validation_view possui índice inválido",
+        )
+        _require(
+            len(set(validation_view.indices)) == len(validation_view),
+            "validation_view possui índices duplicados",
+        )
+        _require(
+            validation_view.indices == tuple(sorted(validation_view.indices)),
+            "validation_view deve preservar ordem crescente dos índices",
+        )
+        _require(
+            not set(train_view.indices).intersection(validation_view.indices),
+            "train_view intersecta validation_view",
+        )
     namespace = _namespace(model_family, client_id)
     training_seed = _training_seed(training_seed)
     blocks = _positive_int("blocks", blocks)
@@ -418,6 +459,7 @@ def train_blocks(network, train_view: DatasetView, *, model_family: str,
 
     examples_processed = 0
     optimizer_steps = 0
+    monitored_blocks = []
 
     for block in range(blocks):
         step_report = train_step(
@@ -428,12 +470,23 @@ def train_blocks(network, train_view: DatasetView, *, model_family: str,
         )
         examples_processed += step_report.examples_processed
         optimizer_steps += step_report.optimizer_steps
+        if validation_view is not None:
+            prediction = predict_view(network, validation_view)
+            metrics = evaluate_scores(
+                prediction.labels, prediction.scores, logits=prediction.logits,
+            )
+            monitored_blocks.append(MonitoredBlockReport(
+                block_index=block,
+                training=step_report,
+                validation_indices=prediction.indices,
+                validation_metrics=_freeze(metrics),
+            ))
 
     theoretical_examples, theoretical_steps = theoretical_costs(
         len(train_view), blocks=blocks, epochs_per_block=epochs_per_block,
         batch_size=batch_size,
     )
-    return BlockTrainingReport(
+    training_report = BlockTrainingReport(
         model_family=model_family,
         namespace=namespace,
         client_id=client_id,
@@ -448,6 +501,57 @@ def train_blocks(network, train_view: DatasetView, *, model_family: str,
         theoretical_steps=theoretical_steps,
         fit_indices=tuple(train_view.indices),
     )
+    return training_report, tuple(monitored_blocks)
+
+
+def train_blocks(network, train_view: DatasetView, *, model_family: str,
+                 training_seed: int, initial_state: Mapping,
+                 client_id: str | None = None,
+                 blocks: int = BLOCKS, epochs_per_block: int = EPOCHS_PER_BLOCK,
+                 batch_size: int = BATCH_SIZE,
+                 learning_rate: float = LEARNING_RATE,
+                 shuffle_seed_fn=shuffle_seed) -> BlockTrainingReport:
+    """Treina central ou localmente, recriando Adam no início de cada bloco.
+
+    ``initial_state`` deve ser uma cópia da saída única de
+    ``initial_state_dict`` no caminho oficial. A função muta ``network`` e
+    devolve somente contabilização e prova do escopo de treino.
+    """
+    report, _ = _train_blocks_core(
+        network, train_view, model_family=model_family,
+        training_seed=training_seed, initial_state=initial_state,
+        client_id=client_id, blocks=blocks,
+        epochs_per_block=epochs_per_block, batch_size=batch_size,
+        learning_rate=learning_rate, shuffle_seed_fn=shuffle_seed_fn,
+    )
+    return report
+
+
+def train_blocks_monitored(network, train_view: DatasetView,
+                           validation_view: DatasetView, *, model_family: str,
+                           training_seed: int, initial_state: Mapping,
+                           client_id: str | None = None,
+                           blocks: int = BLOCKS,
+                           epochs_per_block: int = EPOCHS_PER_BLOCK,
+                           batch_size: int = BATCH_SIZE,
+                           learning_rate: float = LEARNING_RATE,
+                           shuffle_seed_fn=shuffle_seed
+                           ) -> MonitoredTrainingReport:
+    """Treina todos os blocos e observa validation sem adaptação ou seleção.
+
+    Validation é avaliada exatamente uma vez após cada bloco. Ela não participa
+    do treino, não consome seed e não altera pesos, optimizer ou checkpoint.
+    A API não recebe conjunto de test.
+    """
+    training, block_reports = _train_blocks_core(
+        network, train_view, model_family=model_family,
+        training_seed=training_seed, initial_state=initial_state,
+        client_id=client_id, blocks=blocks,
+        epochs_per_block=epochs_per_block, batch_size=batch_size,
+        learning_rate=learning_rate, shuffle_seed_fn=shuffle_seed_fn,
+        validation_view=validation_view,
+    )
+    return MonitoredTrainingReport(training=training, blocks=block_reports)
 
 
 def predict_view(network, view: DatasetView) -> MLPBatchPrediction:

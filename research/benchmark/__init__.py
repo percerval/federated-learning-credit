@@ -25,6 +25,8 @@ from research.benchmark.mlp import (
     MLPArchitecture,
     MLPBatchPrediction,
     MLPError,
+    MonitoredBlockReport,
+    MonitoredTrainingReport,
     build_loss,
     build_network,
     clone_state_dict,
@@ -34,6 +36,7 @@ from research.benchmark.mlp import (
     predict_view,
     theoretical_costs,
     train_blocks,
+    train_blocks_monitored,
 )
 from research.benchmark.provenance import artifact_id, build_provenance, file_reference
 from research.benchmark.seeding import (
@@ -57,6 +60,8 @@ __all__ = [
     "MLPArchitecture",
     "MLPBatchPrediction",
     "MLPError",
+    "MonitoredBlockReport",
+    "MonitoredTrainingReport",
     "MajorityBaseline",
     "RandomForestBaseline",
     "ARCHITECTURE",
@@ -85,6 +90,7 @@ __all__ = [
     "shuffle_seed",
     "theoretical_costs",
     "train_blocks",
+    "train_blocks_monitored",
     "train_fedavg",
     "weighted_batch_loss",
 ]
